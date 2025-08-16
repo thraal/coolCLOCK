@@ -88,7 +88,7 @@ Treat as two buttons that share the middle GND:
 
 This gives you **UP** to cycle styles/effects and **DOWN** to cycle colors.
 
-### Wiring Diagram
+## Wiring Diagram
 
 ```mermaid
 flowchart LR
@@ -96,61 +96,47 @@ flowchart LR
   %% coolCLOCK Wiring Diagram
   %% =========================
 
-  %% Power Supply
-  PSU[["YwRobot 545043<br/>5V Power Supply"]]
+  PSU[YwRobot 545043 5V PSU]
 
-  %% ESP32-C6
   subgraph ESP[ESP32-C6-WROOM-1]
-    direction TB
-    VCC[VIN / 5V]
+    VCC[VIN 5V]
     GND1[GND]
-    GPIO2[GPIO2 (LED Data)]
-    GPIO19[GPIO19 (MOM Up)]
-    GPIO20[GPIO20 (MOM Down)]
-    GPIO21[GPIO21 (ON-ON A)]
-    GPIO22[GPIO22 (ON-ON B)]
+    GPIO2[GPIO2 LED Data]
+    GPIO19[GPIO19 MOM Up]
+    GPIO20[GPIO20 MOM Down]
+    GPIO21[GPIO21 ON-ON A]
+    GPIO22[GPIO22 ON-ON B]
   end
 
-  %% LED Matrix
-  subgraph LED[WS2812B 32×8 Matrix]
-    direction TB
+  subgraph LED[WS2812B 32x8 Matrix]
     LED5V[5V]
     LEDGND[GND]
     LEDDIN[DIN]
   end
 
-  %% Series Resistor and Bulk Capacitor
-  Rseries[/"330-470 Ω\nseries resistor"/]
-  Cbulk[["≥1000 µF\nacross 5V↔GND\n(near matrix)"]]
+  Rseries[330-470 Ohm resistor]
+  Cbulk[1000 uF capacitor]
 
-  %% Switches
-  subgraph SW1["ON-ON Toggle (Clock ↔ Party)"]
-    direction TB
-    SW1A[Outer A → GPIO21]
-    SW1B[Outer B → GPIO22]
-    SW1C[Center → GND]
+  subgraph SW1[ON-ON Toggle Clock/Party]
+    SW1A[Pin A -> GPIO21]
+    SW1B[Pin B -> GPIO22]
+    SW1C[Center -> GND]
   end
 
-  subgraph SW2["MOM-0-MOM (Up/Down)"]
-    direction TB
-    SW2U[Up → GPIO19]
-    SW2D[Down → GPIO20]
-    SW2C[Center → GND]
+  subgraph SW2[MOM-0-MOM Up/Down]
+    SW2U[Up -> GPIO19]
+    SW2D[Down -> GPIO20]
+    SW2C[Center -> GND]
   end
 
-  %% Power wiring
-  PSU -- 5V --> ESP:::pwr
-  PSU -- 5V --> LED5V:::pwr
-  PSU -- GND --> GND1
+  PSU --> VCC
+  PSU --> LED5V
+  PSU --> GND1
   GND1 --- LEDGND
 
-  %% Bulk capacitor across LED power
   LED5V --- Cbulk --- LEDGND
-
-  %% LED data with series resistor
   GPIO2 --> Rseries --> LEDDIN
 
-  %% Switch wiring (active-LOW with internal pull-ups)
   SW1A --> GPIO21
   SW1B --> GPIO22
   SW1C --- GND1
@@ -158,10 +144,6 @@ flowchart LR
   SW2U --> GPIO19
   SW2D --> GPIO20
   SW2C --- GND1
-
-  %% Styling
-  classDef pwr fill:#ffe9a8,stroke:#caa95b,color:#3b2f00;
-  class ESP,LED,PSU,SW1,SW2 default;
 ```
 
 ### Notes
