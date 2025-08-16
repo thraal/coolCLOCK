@@ -88,34 +88,80 @@ Treat as two buttons that share the middle GND:
 
 This gives you **UP** to cycle styles/effects and **DOWN** to cycle colors.
 
-### ASCII Wiring Diagram
+### Wiring Diagram
 
-```text
-       +--------------------------+
-       |   YwRobot 545043 PSU     |
-       |     5V / GND out         |
-       +-----------+--------------+
-                   |
-     +-------------+--------------------+
-     |                                  |
- +---v----+                        +----v-----+
- | ESP32  |                        | WS2812B  |
- |  C6    |                        | 32x8 LED |
- |        |                        |  Matrix  |
- |     5V +------------------------+ 5V       |
- |    GND +------------------------+ GND      |
- |  GPIO2 +----[330-470R]----------+ DIN      |
- |        |                        |          |
- | GPIO21 +--- ON-ON outer A       |          |
- | GPIO22 +--- ON-ON outer B       +----------+
- |    GND +--- ON-ON center
- |        |
- | GPIO19 +--- MOM upper
- | GPIO20 +--- MOM lower
- |    GND +--- MOM center
- +--------+
+```mermaid
+flowchart LR
+  %% =========================
+  %% coolCLOCK Wiring Diagram
+  %% =========================
 
-(≥1000 µF cap across 5V/GND near matrix)
+  %% Power Supply
+  PSU[["YwRobot 545043<br/>5V Power Supply"]]
+
+  %% ESP32-C6
+  subgraph ESP[ESP32-C6-WROOM-1]
+    direction TB
+    VCC[VIN / 5V]
+    GND1[GND]
+    GPIO2[GPIO2 (LED Data)]
+    GPIO19[GPIO19 (MOM Up)]
+    GPIO20[GPIO20 (MOM Down)]
+    GPIO21[GPIO21 (ON-ON A)]
+    GPIO22[GPIO22 (ON-ON B)]
+  end
+
+  %% LED Matrix
+  subgraph LED[WS2812B 32×8 Matrix]
+    direction TB
+    LED5V[5V]
+    LEDGND[GND]
+    LEDDIN[DIN]
+  end
+
+  %% Series Resistor and Bulk Capacitor
+  Rseries[/"330-470 Ω\nseries resistor"/]
+  Cbulk[["≥1000 µF\nacross 5V↔GND\n(near matrix)"]]
+
+  %% Switches
+  subgraph SW1["ON-ON Toggle (Clock ↔ Party)"]
+    direction TB
+    SW1A[Outer A → GPIO21]
+    SW1B[Outer B → GPIO22]
+    SW1C[Center → GND]
+  end
+
+  subgraph SW2["MOM-0-MOM (Up/Down)"]
+    direction TB
+    SW2U[Up → GPIO19]
+    SW2D[Down → GPIO20]
+    SW2C[Center → GND]
+  end
+
+  %% Power wiring
+  PSU -- 5V --> ESP:::pwr
+  PSU -- 5V --> LED5V:::pwr
+  PSU -- GND --> GND1
+  GND1 --- LEDGND
+
+  %% Bulk capacitor across LED power
+  LED5V --- Cbulk --- LEDGND
+
+  %% LED data with series resistor
+  GPIO2 --> Rseries --> LEDDIN
+
+  %% Switch wiring (active-LOW with internal pull-ups)
+  SW1A --> GPIO21
+  SW1B --> GPIO22
+  SW1C --- GND1
+
+  SW2U --> GPIO19
+  SW2D --> GPIO20
+  SW2C --- GND1
+
+  %% Styling
+  classDef pwr fill:#ffe9a8,stroke:#caa95b,color:#3b2f00;
+  class ESP,LED,PSU,SW1,SW2 default;
 ```
 
 ### Notes
