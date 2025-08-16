@@ -2,11 +2,14 @@
 
 ## Essence
 
-- DIY Wi-Fi connected clock using an ESP32-C6 and a 32×8 WS2812B LED matrix  
-- Dual purpose: **Clock** (time via NTP) and **Lamp** (solid/ambient colors)  
-- Optional **Party Mode** with animated effects and transitions  
-- **Buttons** for switching modes, colors, brightness, and party toggles  
-- **Persistent settings** stored on ESP32 (brightness, colors, modes)  
+* DIY Wi-Fi connected clock using an **ESP32-C6** and a **32×8 WS2812B** LED matrix
+* Dual purpose: **Clock** (time via NTP) and **Lamp** (solid/ambient colors)
+* Optional **Party Mode** with animated effects and transitions
+* **Switches** for:
+
+  * permanent **2-position** toggle → Clock vs Party (mode group)
+  * **momentary up/down** (center-return) → select style/effect (up) and color (down)
+* **Persistent settings** stored on ESP32 (brightness, colors, modes)
 
 ---
 
@@ -14,112 +17,128 @@
 
 ### Hardware
 
-- ESP32-C6-WROOM-1 development board  
-- WS2812B 32 × 8 LED matrix (256 LEDs)  
-- Stable 5 V power supply (**YwRobot 545043** module, shared between ESP32 and LED matrix)  
-- 330-470 Ω resistor in series with LED DIN  
-- ≥1000 µF capacitor across 5 V / GND near LED matrix  
-- 1-2 push buttons with pull-ups  
-- USB cable for flashing and debugging  
-- Optional: 3D printed case or diffuser for softer visuals  
+* ESP32-C6-WROOM-1 development board
+* WS2812B 32×8 LED matrix (256 LEDs)
+* Stable 5 V supply (**YwRobot 545043** module, shared between ESP32 and matrix)
+* 330-470 Ω series resistor on LED DIN
+* ≥1000 µF capacitor across LED 5 V/GND (near matrix)
+* **Switches**:
+
+  * 1× **ON-ON** 2-position toggle (3 pins) — metal rod that clicks up/down
+  * 1× **MOM-0-MOM** momentary 3-position (3 pins, spring returns to center)
+* USB-C / USB cable for flashing & debug
+* Optional: 3D-printed case/diffuser
 
 ### Software
 
-- [Arduino IDE](https://www.arduino.cc/en/software) or PlatformIO  
-- ESP32 board support (Espressif)  
-- Libraries:  
-  - [FastLED](https://github.com/FastLED/FastLED)  
-  - `WiFi.h`, `time.h`, `esp_sntp.h` (ESP32 core)  
-  - `Preferences.h` (ESP32 NVS storage)  
+* Arduino IDE (or PlatformIO)
+* ESP32 core (Espressif)
+* Libraries:
+
+  * **FastLED**
+  * `WiFi.h`, `time.h`, `esp_sntp.h` (ESP32 core)
+  * `Preferences.h` (ESP32 NVS storage)
 
 ---
 
 ## Hardware Wiring
 
-The setup uses a **YwRobot 545043** regulated power supply to provide **5 V** for both the WS2812B LED matrix and the ESP32-C6 board.
+The **YwRobot 545043** provides the 5 V rail for both the ESP32-C6 and the LED matrix.
 
 ### Power
 
-- **YwRobot 5V → WS2812B 5V**  
-- **YwRobot 5V → ESP32 5V (VIN)**  
-- **YwRobot GND → WS2812B GND → ESP32 GND**  
+* **5V PSU → WS2812B 5V**
+* **5V PSU → ESP32 5V (VIN)**
+* **GND PSU → WS2812B GND → ESP32 GND** (all grounds common)
 
-Add:  
+Add near the matrix:
 
-- **≥1000 µF capacitor** across LED 5 V and GND  
-- **330-470 Ω resistor** in series with WS2812B DIN  
+* **≥1000 µF** capacitor across 5 V and GND
+* **330-470 Ω** series resistor in line with **DIN**
 
-### Data
+### Data (LEDs)
 
-- **ESP32-C6 GPIO2 → WS2812B DIN**  
+* **ESP32-C6 GPIO2 → series 330-470 Ω → WS2812B DIN**
 
-### Buttons (planned)
+### Switches
 
-- **Button A → GPIO8 → GND** (with internal pull-up)  
-- **Button B → GPIO9 → GND** (with internal pull-up)  
+**Important (C6 pins):** avoid boot/USB pins. Use regular GPIOs like **19, 20, 21, 22**.
+
+#### A) 2-position ON-ON toggle (mode group: Clock/Party)
+
+We'll read it as a **2-bit state** using two GPIOs and the switch's center pin to GND.
+
+* **Common (center) → GND**
+* **Outer-A → GPIO21 (INPUT\_PULLUP)**
+* **Outer-B → GPIO22 (INPUT\_PULLUP)**
+
+Result (active-LOW):
+
+* Position 1 → GPIO21 = **LOW**, GPIO22 = HIGH  → **Clock group**
+* Position 2 → GPIO21 = HIGH, GPIO22 = **LOW**  → **Party group**
+* (No floating states; robust and deterministic.)
+
+#### B) MOM-0-MOM (up/down momentary)
+
+Treat as two buttons that share the middle GND:
+
+* **Common (center) → GND**
+* **Up contact → GPIO19 (INPUT\_PULLUP)** → "UP button (active-LOW)
+* **Down contact → GPIO20 (INPUT\_PULLUP)** → "DOWN" button (active-LOW)
+
+This gives you **UP** to cycle styles/effects and **DOWN** to cycle colors.
 
 ### ASCII Wiring Diagram
 
 ```text
        +--------------------------+
        |   YwRobot 545043 PSU     |
-       |   5V / GND regulated     |
+       |     5V / GND out         |
        +-----------+--------------+
                    |
-     +-------------+-----------------+
-     |                               |
- +---v---+                     +-----v------+
-\| ESP32 |                     | WS2812B    |
-\|  C6   |                     | 32x8 Matrix|
-\|       |                     |            |
-\|    5V +---------------------+ 5V         |
-\|   GND +---------------------+ GND        |
-\| GPIO2 +---------------------+ DIN        |
-\|       |                     |            |
-\| GPIO8 <-- Button A --> GND  |            |
-\| GPIO9 <-- Button B --> GND  |            |
-\|       |                     |            |
- +-------+                     +------------+
+     +-------------+-------------------+
+     |                                 |
+ +---v----+                        +----v-----+
+ | ESP32  |                        | WS2812B  |
+ |  C6    |                        | 32x8 LED |
+ |        |                        |  Matrix  |
+ |     5V +------------------------+ 5V       |
+ |    GND +------------------------+ GND      |
+ |  GPIO2 +----[330-470R]----------+ DIN      |
+ |        |                        |          |
+ | GPIO21 +--- ON-ON outer A       |          |
+ | GPIO22 +--- ON-ON outer B       +----------+
+ |    GND +--- ON-ON center
+ |        |
+ | GPIO19 +--- MOM upper
+ | GPIO20 +--- MOM lower
+ |    GND +--- MOM center
+ +--------+
 
-(Capacitor ≥1000 µF across 5V/GND near LED matrix)
-(Resistor 330-470 Ω in series with DIN line)
-
+(≥1000 µF cap across 5V/GND near matrix)
 ```
 
 ### Notes
 
-- Keep LED data line short and with resistor close to DIN.  
-- Power supply sizing:  
-  - Full white, 100% = ~15 A (not practical).  
-  - Firmware limits brightness and current (`FastLED.setMaxPowerInVoltsAndMilliamps`).  
-  - At reduced brightness (typical 1/8 to 1/4), the YwRobot module is sufficient.  
-- Power LED strip **before or at same time** as ESP32 to prevent backfeeding.  
+* Use **INPUT\_PULLUP** and wire switch contacts to **GND** for clean logic-LOW on press.
+* Keep DIN short; place the series resistor close to the first LED.
+* Current math: full-white 256 LEDs @ 60 mA each ≈ 15 A. Firmware limits brightness and can use `FastLED.setMaxPowerInVoltsAndMilliamps(...)` to stay modest.
 
-### Pinout Table
+### Safe Pin Choices (ESP32-C6-WROOM-1)
 
-| Function        | ESP32-C6 Pin | Connected To           | Notes                                |
-|-----------------|--------------|------------------------|--------------------------------------|
-| LED Data        | GPIO2        | WS2812B DIN            | With 330-470 Ω series resistor       |
-| LED Power       | VIN / 5V     | WS2812B 5V (from PSU)  | Shared 5 V from YwRobot 545043       |
-| LED Ground      | GND          | WS2812B GND            | Common ground with PSU               |
-| Button A        | GPIO8        | Push button → GND      | Internal pull-up enabled             |
-| Button B        | GPIO9        | Push button → GND      | Internal pull-up enabled             |
-| ESP32 Power     | VIN / 5V     | YwRobot 5 V output     | USB also used for flashing/debugging |
-| ESP32 Ground    | GND          | YwRobot GND            | Must be shared with LED ground       |
+* **Good**: GPIO **2, 3, 6, 7, 10, 11, 18, 19, 20, 21, 22, 23**
+* **Avoid**: boot strapping & USB (**4, 5, 8, 9, 12, 13, 15**) and internal flash (24-30).
 
 ---
 
 ## Current Features
 
-- Wi-Fi connection and NTP time sync (CET/CEST timezone with DST)  
-- 5×7 pixel font rendering for digits and text  
-- Demo cycle of multiple **modes**:  
-  - Scan line  
-  - HELLO text  
-  - Time display (test variants)  
-  - Animated effects: sinelon, confetti  
-  - Transition effects: sweep, confetti reveal  
-- Non-blocking animation loop with timing  
+* Wi-Fi + NTP time sync (CET/CEST via TZ rule)
+* 5×7 font rendering for text/time
+* Demo modes: scan, HELLO, time (test variants)
+* Animated effects: sinelon, confetti
+* Transition effects: **sweep**, **confetti reveal**
+* Non-blocking frame loop
 
 ---
 
@@ -127,86 +146,86 @@ Add:
 
 ### Clock Mode
 
-- Live time display in multiple **styles** (simple, shadow, etc.)  
-- User-selectable text color  
-- Party mode: fancy transitions (confetti, wipes, sparkles) on minute changes  
-- Automatic periodic NTP re-sync  
+* Live time display in multiple styles
+* User-selectable color
+* Minute-change transitions (when Party group is selected)
+* Auto periodic NTP re-sync
 
 ### Lamp Mode
 
-- Solid color lamp (warm/cool tones)  
-- Gradient or ambient color modes  
-- Party mode: playful animations (confetti, rainbow waves, color flows)  
-- Adjustable brightness  
+* Solid color and ambient gradients
+* Adjustable brightness and color
+* Optional playful animations in Party mode
 
-### Buttons
+### Switch/Buttons Behavior
 
-- Support for short / long / double press  
-- Example mappings:  
-  - **Button A short:** toggle Clock ↔ Lamp  
-  - **Button A long:** toggle Party mode  
-  - **Button A double:** cycle brightness levels  
-  - **Button B short:** cycle clock style or lamp effect  
-  - **Button B long:** enter color picker  
-- Color picker overlay:  
-  - Hue bar displayed across screen  
-  - Navigate with button B  
-  - Confirm with button A  
+* **ON-ON toggle (GPIO21/22)** → **Clock** vs **Party** group
+
+  * Read the two lines each frame; choose group accordingly
+* **MOM-0-MOM up (GPIO19)** → cycle **styles/effects** within the current group
+* **MOM-0-MOM down (GPIO20)** → cycle **colors** (or brightness if you prefer)
+
+> Debounce: use **software debounce** (e.g., 10-20 ms) + **edge detection**.
+> Optional long-press/double-tap can be added later; the hardware supports it.
 
 ### Settings
 
-- Persistent storage in ESP32 NVS:  
-  - Brightness  
-  - Clock color  
-  - Lamp color  
-  - Selected lamp effect  
-  - Party mode enabled/disabled  
-- Power limiting using FastLED (`setMaxPowerInVoltsAndMilliamps`)  
+* NVS-backed persistence for:
+
+  * Brightness, clock color, lamp color
+  * Selected style/effect per group
+  * Party enabled state
+* Power limiting via FastLED
 
 ---
 
 ## Roadmap / Milestones
 
-1. **MVP Clock**  
-   - Stable Wi-Fi + NTP time sync  
-   - Time display with basic font  
-   - Brightness limiter  
+1. **MVP Clock**
 
-2. **Input Handling**  
-   - Button reading (short/long/double press)  
-   - Mode switching (Clock ↔ Lamp)  
+   * Stable Wi-Fi + NTP
+   * Time display with basic style
+   * Brightness limiter
 
-3. **Lamp Mode**  
-   - Solid and gradient color modes  
-   - Brightness adjustment  
-   - Color picker overlay  
+2. **Input Handling**
 
-4. **Party Mode**  
-   - Clock: transitions on minute changes  
-   - Lamp: confetti and animated color flows  
+   * Read ON-ON toggle (2 GPIOs) → select group
+   * Read MOM up/down → cycle style/color
+   * Software debounce + edge detection
 
-5. **Persistence**  
-   - Save settings in NVS  
-   - Restore on boot  
+3. **Lamp Mode**
 
-6. **Quality of Life**  
-   - OTA firmware updates  
-   - Wi-Fi fallback AP config  
-   - Optional: Web interface or MQTT integration  
+   * Solid & gradient modes
+   * Color/brightness control via down/up
+
+4. **Party Mode**
+
+   * Clock: confetti/sweep on transitions
+   * Lamp: animations and color flows
+
+5. **Persistence**
+
+   * Save/restore settings from NVS
+
+6. **QoL**
+
+   * OTA updates
+   * Wi-Fi fallback AP config
+   * Optional Web UI / MQTT
 
 ---
 
 ## Status
 
-Currently experimenting with:
+Working:
 
-- Text rendering on the LED matrix  
-- Animated transitions (sweep, confetti reveal)  
-- Test modes and demo effects  
-- Wi-Fi + NTP setup on ESP32-C6  
+* Matrix rendering & transitions (sweep, confetti reveal)
+* Wi-Fi + NTP on ESP32-C6
+* Mode state machine & frame loop
 
-Next up:  
+Next:
 
-- Button wiring and input handling  
-- First working Clock ↔ Lamp toggle  
-- Persistence of brightness and colors  
+* Wire the **ON-ON** and **MOM-0-MOM** as above
+* Add input polling + debounce + edge detection
+* Map behavior: **toggle → group**, **up → style**, **down → color**
+* Persist brightness/color/effect
