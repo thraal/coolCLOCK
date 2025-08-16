@@ -1,347 +1,440 @@
-/*
-Name:		coolClock.ino
-Created:	24-Nov-16 16:57:45
-Author:	Tom
-*/
+#include <FastLED.h>
+#include <WiFi.h>
+#include "time.h"
+#include "esp_sntp.h"
 
-// defines
+// ---------- Wi-Fi & Time ----------
+const char *ssid = "CoolHouse";
+const char *password = "w6HSB2S3bb043!";
 
-#define countof(a) (sizeof(a) / sizeof(a[0]))
-#define DHTPIN 6                              // DHT temperature sensor pin
-#define DHTTYPE DHT22                         // set DHT to type DHT22 (AM2302)
+const char *ntpServer1 = "pool.ntp.org";
+const char *ntpServer2 = "time.nist.gov";
+const char *time_zone  = "CET-1CEST,M3.5.0,M10.5.0/3"; // Europe/Brussels-like TZ with DST
 
-// libraries
+// ---------- Matrix ----------
+#define DATA_PIN 2
+#define MATRIX_WIDTH  32
+#define MATRIX_HEIGHT 8
+#define COLOR_ORDER   GRB
+#define MATRIX_TYPE   WS2812B
+#define MATRIX_BRIGHTNESS 10
+#define NUM_LEDS (MATRIX_WIDTH * MATRIX_HEIGHT)
+CRGB leds[NUM_LEDS];
 
-#include <FiniteStateMachine.h>
-#include <Adafruit_Sensor.h> // dependency
-#include <DHT.h>
-#include <DHT_U.h>           // dependency
-#include <LiquidCrystal.h>
-#include <TimeLib.h>
-#include <TimeAlarms.h>
-#include <avr/pgmspace.h>    // dependency
-#include <Wire.h>            // dependency
-#include <RtcDS1307.h>
-#include <RBD_Timer.h>
-#include <RBD_Button.h>
+// ---------- Modes ----------
+enum Mode {
+  MODE_SCAN, MODE_HELLO, MODE_TIME1, MODE_TIME2, MODE_TIME3,
+  MODE_SINELON, MODE_CONFETTI,
+  MODE_TRANSITION,              // sweep transition (TIME1 -> TIME2)
+  MODE_CONFETTI_REVEAL          // confetti reveal transition (TIME2 -> TIME3)
+};
+Mode mode = MODE_SCAN;
+unsigned long modeStart = 0;
+uint8_t gHue = 0;
 
-// global variables: hardware initialization
+// ---- Transition buffers & state ----
+CRGB fromBuf[NUM_LEDS];
+CRGB toBuf[NUM_LEDS];
 
-RtcDS1307 Rtc;                         // real-time clock
-LiquidCrystal lcd(12, 11, 5, 4, 3, 2); // initialize the library with the interface pins
-DHT_Unified dht(DHTPIN, DHTTYPE);      // DHT temperature sensor
+Mode      transitionNext = MODE_SCAN;
+unsigned long transitionStart = 0;
+const uint16_t TRANSITION_MS = 800;   // duration for sweep transition
 
-RBD::Button leftButton(8);
-RBD::Button rightButton(9);
-RBD::Button upButton(49);
-RBD::Button downButton(47);
-RBD::Button setButton(45);
-RBD::Button modeButton(41);
-RBD::Button alarm1Button(51);
-RBD::Button alarm2Button(53);
-RBD::Button okButton(43);
-RBD::Button snoozeButton(39);
+// Confetti reveal state
+CRGB currBuf[NUM_LEDS];               // starts as fromBuf, evolves toward toBuf
+uint8_t flashed[NUM_LEDS];            // 0 = not yet hit by confetti, 1 = hit
+uint16_t flashedCount = 0;
+const uint8_t CONFETTI_FLIPS_PER_FRAME = 1;  // how many new pixels to flip each frame
 
-// function prototypes
+// ---------- Mapping ----------
+static inline uint16_t XY(uint8_t x, uint8_t y) {
+  uint8_t col_from_right = (MATRIX_WIDTH - 1) - x;
+  uint16_t base = (uint16_t)col_from_right * MATRIX_HEIGHT;
+  return (col_from_right & 1) ? base + (MATRIX_HEIGHT - 1 - y) : base + y;
+}
 
-void timedisplayEnter();
-void timedisplayUpdate();
-void timedisplayExit();
-void configureEnter();
-void configureUpdate();
-void configureExit();
-void alarmEnter();
-void alarmUpdate();
-void alarmExit();
-void alarm1displayUpdate();
-void alarm2displayUpdate();
-void alarm1setEnter();
-void alarm2setEnter();
-void alarm1setUpdate();
-void alarm2setUpdate();
-void alarm1setExit();
-void alarm2setExit();
+// ---------- Font ----------
+#define __ 0
+#define X  1
+#define _  0
+#define ROW5(a,b,c,d,e) ((uint8_t)((a<<4)|(b<<3)|(c<<2)|(d<<1)|(e)))
 
-// global variables: function logic
+#define CH_H 0
+#define CH_E 1
+#define CH_L 2
+#define CH_O 3
+#define CH_0 4
+#define CH_1 5
+#define CH_2 6
+#define CH_3 7
+#define CH_4 8
+#define CH_5 9
+#define CH_6 10
+#define CH_7 11
+#define CH_8 12
+#define CH_9 13
+#define CH_COLON 14
 
-float temperature, humidity; // display value
-const float tempoffset = 0;  // offset for temperature calibration
-const char initmessage[] = "Alarmklok Initialisatie";
-int errorflag = 0;
+const uint8_t font5x7_rows[][7] = {
+  {ROW5(X,_,_,_,X), ROW5(X,_,_,_,X), ROW5(X,_,_,_,X), ROW5(X,X,X,X,X), ROW5(X,_,_,_,X), ROW5(X,_,_,_,X), ROW5(X,_,_,_,X)},
+  {ROW5(X,X,X,X,X), ROW5(X,_,_,_,_), ROW5(X,_,_,_,_), ROW5(X,X,X,_,_), ROW5(X,_,_,_,_), ROW5(X,_,_,_,_), ROW5(X,X,X,X,X)},
+  {ROW5(X,_,_,_,_), ROW5(X,_,_,_,_), ROW5(X,_,_,_,_), ROW5(X,_,_,_,_), ROW5(X,_,_,_,_), ROW5(X,_,_,_,_), ROW5(X,X,X,X,X)},
+  {ROW5(_,X,X,X,_), ROW5(X,_,_,_,X), ROW5(X,_,_,_,X), ROW5(X,_,_,_,X), ROW5(X,_,_,_,X), ROW5(X,_,_,_,X), ROW5(_,X,X,X,_)},
 
-// Alarms
+  {ROW5(_,X,X,X,_), ROW5(X,_,_,_,X), ROW5(X,_,_,_,X), ROW5(X,_,_,_,X), ROW5(X,_,_,_,X), ROW5(X,_,_,_,X), ROW5(_,X,X,X,_)},
+  {ROW5(__,_,X,_,__), ROW5(_,X,X,_,_), ROW5(__,_,X,_,__), ROW5(__,_,X,_,__), ROW5(__,_,X,_,__), ROW5(__,_,X,_,__), ROW5(_,X,X,X,_)},
+  {ROW5(_,X,X,X,_), ROW5(X,_,_,_,X), ROW5(__,_,_,_,X), ROW5(__,_,_,X,_), ROW5(__,_,X,_,__), ROW5(_,X,_,_,__), ROW5(X,X,X,X,X)},
+  {ROW5(X,X,X,X,_), ROW5(__,_,_,_,X), ROW5(__,_,_,_,X), ROW5(_,X,X,X,_), ROW5(__,_,_,_,X), ROW5(__,_,_,_,X), ROW5(X,X,X,X,_)},
 
-AlarmId alarmSyncRealTimeClock;
-AlarmId alarmSyncTemperature;
-AlarmId alarmDisplayTime;
+  {ROW5(__,_,_,X,_), ROW5(__,_,X,X,_), ROW5(__,X,_,X,_), ROW5(X,_,_,X,_), ROW5(X,X,X,X,X), ROW5(__,_,_,X,_), ROW5(__,_,_,X,_)},
+  {ROW5(X,X,X,X,X), ROW5(X,_,_,_,_), ROW5(X,X,X,X,_), ROW5(__,_,_,_,X), ROW5(__,_,_,_,X), ROW5(X,_,_,_,X), ROW5(_,X,X,X,_)},
+  {ROW5(__,_,X,X,_), ROW5(__,X,_,_,_), ROW5(X,_,_,_,_), ROW5(X,X,X,X,_), ROW5(X,_,_,_,X), ROW5(X,_,_,_,X), ROW5(_,X,X,X,_)},
+  {ROW5(X,X,X,X,X), ROW5(__,_,_,_,X), ROW5(__,_,_,X,_), ROW5(__,_,X,_,__), ROW5(__,X,_,_,__), ROW5(__,X,_,_,__), ROW5(__,X,_,_,__)},
 
-// Timers
-RBD::Timer secondsClearTimer;
-RBD::Timer secondsDisplayTimer;
+  {ROW5(_,X,X,X,_), ROW5(X,_,_,_,X), ROW5(X,_,_,_,X), ROW5(_,X,X,X,_), ROW5(X,_,_,_,X), ROW5(X,_,_,_,X), ROW5(_,X,X,X,_)},
+  {ROW5(_,X,X,X,_), ROW5(X,_,_,_,X), ROW5(X,_,_,_,X), ROW5(_,X,X,X,X), ROW5(__,_,_,_,X), ROW5(__,_,_,X,_), ROW5(_,X,X,_,_)},
+  {ROW5(__,_,_,_,__), ROW5(__,_,_,_,__), ROW5(__,_,X,_,__), ROW5(__,_,_,_,__), ROW5(__,_,X,_,__), ROW5(__,_,_,_,__), ROW5(__,_,_,_,__)},
+};
 
-// Finite State Machine states
+static inline uint8_t glyphWidth(uint8_t g) { return (g == CH_COLON) ? 3 : 5; }
+static inline int8_t  glyphIndex(char c) {
+  switch (c) {
+    case 'H': return CH_H; case 'E': return CH_E; case 'L': return CH_L; case 'O': return CH_O;
+    case '0': return CH_0; case '1': return CH_1; case '2': return CH_2; case '3': return CH_3; case '4': return CH_4;
+    case '5': return CH_5; case '6': return CH_6; case '7': return CH_7; case '8': return CH_8; case '9': return CH_9;
+    case ':': return CH_COLON; default: return -1;
+  }
+}
+static inline void drawChar5x7(uint8_t x0, uint8_t y0, uint8_t g, const CRGB &color) {
+  for (uint8_t r = 0; r < 7; r++) {
+    uint8_t bits = font5x7_rows[g][r];
+    for (uint8_t c = 0; c < 5; c++) {
+      if (bits & (1 << (4 - c))) {
+        uint8_t x = x0 + c, y = y0 + (6 - r);
+        if (x < MATRIX_WIDTH && y < MATRIX_HEIGHT) leds[XY(x, y)] = color;
+      }
+    }
+  }
+}
+static inline uint8_t textWidth(const char *s) {
+  uint8_t w = 0, n = 0;
+  for (const char *p = s; *p; ++p) { int8_t gi = glyphIndex(*p); w += (gi >= 0 ? glyphWidth(gi) : 3); n++; }
+  if (n > 1) w += (n - 1);
+  return w;
+}
+static inline void drawText(const char *s, uint8_t y0, const CRGB &color) {
+  int16_t x = 0; uint8_t w = textWidth(s);
+  if (MATRIX_WIDTH > w) x = (MATRIX_WIDTH - w) / 2;
+  for (const char *p = s; *p; ++p) {
+    int8_t gi = glyphIndex(*p);
+    uint8_t adv = (gi >= 0 ? glyphWidth(gi) : 3);
+    if (gi >= 0) drawChar5x7(x, y0, gi, color);
+    x += adv + 1;
+  }
+}
 
-State timedisplay = State(timedisplayEnter, timedisplayUpdate, timedisplayExit); // default display mode
-State configure = State(configureEnter, configureUpdate, configureExit);         // clock configure mode
-State alarm = State(alarmEnter, alarmUpdate, alarmExit);                         // alarm going off
-State alarm1display = State(alarm1displayUpdate);                                // display alarm 1
-State alarm2display = State(alarm2displayUpdate);                                // display alarm 2
-State alarm1set = State(alarm1setEnter, alarm1setUpdate, alarm1setExit);         // set alarm 1
-State alarm2set = State(alarm2setEnter, alarm2setUpdate, alarm2setExit);         // set alarm 2
-FSM stateMachine = FSM(timedisplay);                                             // initialize state machine, start state
+// ---- Draw into a TARGET buffer (for transitions) ----
+static inline void drawChar5x7To(CRGB* target, uint8_t x0, uint8_t y0, uint8_t g, const CRGB& color) {
+  for (uint8_t r = 0; r < 7; r++) {
+    uint8_t bits = font5x7_rows[g][r];
+    for (uint8_t c = 0; c < 5; c++) {
+      if (bits & (1 << (4 - c))) {
+        uint8_t x = x0 + c, y = y0 + (6 - r);
+        if (x < MATRIX_WIDTH && y < MATRIX_HEIGHT) target[XY(x, y)] = color;
+      }
+    }
+  }
+}
+static inline void drawTextTo(CRGB* target, const char* s, uint8_t y0, const CRGB& color) {
+  fill_solid(target, NUM_LEDS, CRGB::Black);
+  int16_t x = 0; uint8_t w = textWidth(s);
+  if (MATRIX_WIDTH > w) x = (MATRIX_WIDTH - w) / 2;
+  for (const char* p = s; *p; ++p) {
+    int8_t gi = glyphIndex(*p);
+    uint8_t adv = (gi >= 0 ? glyphWidth(gi) : 3);
+    if (gi >= 0) drawChar5x7To(target, x, y0, gi, color);
+    x += adv + 1;
+  }
+}
 
-																				 /*
-																				 *  board set-up routine
-																				 */
+// Sweep transition (TIME1 -> TIME2)
+static inline void startTransition(const char* fromStr, const CRGB& fromColor,
+                                   const char* toStr,   const CRGB& toColor,
+                                   Mode nextMode) {
+  drawTextTo(fromBuf, fromStr, 0, fromColor);
+  drawTextTo(toBuf,   toStr,   0, toColor);
+  transitionNext  = nextMode;
+  transitionStart = millis();
+  mode = MODE_TRANSITION;
+}
+
+// Confetti reveal transition (TIME2 -> TIME3)
+static inline void startConfettiReveal(const char* fromStr, const CRGB& fromColor,
+                                       const char* toStr,   const CRGB& toColor,
+                                       Mode nextMode) {
+  drawTextTo(fromBuf, fromStr, 0, fromColor);
+  drawTextTo(toBuf,   toStr,   0, toColor);
+  // currBuf begins as the old image
+  for (uint16_t i = 0; i < NUM_LEDS; i++) {
+    currBuf[i] = fromBuf[i];
+    flashed[i] = 0;
+  }
+  flashedCount   = 0;
+  transitionNext = nextMode;
+  modeStart      = millis(); // reuse for any timing if desired
+  mode           = MODE_CONFETTI_REVEAL;
+}
+
+// ---------- Effects ----------
+static inline void sinelon() {
+  fadeToBlackBy(leds, NUM_LEDS, 20);
+  int pos = beatsin16(13, 0, NUM_LEDS - 1);
+  leds[pos] += CHSV(gHue, 255, 192);
+}
+static inline void confetti() {
+  fadeToBlackBy(leds, NUM_LEDS, 10);
+  leds[random16(NUM_LEDS)] += CHSV(gHue + random8(64), 200, 255);
+}
+
+// ---------- Scan (non-blocking) ----------
+uint8_t  scanRow = 0, scanStep = 0;
+uint16_t prevIdx = 0;
+unsigned long lastScanStepMs = 0;
+const uint16_t SCAN_INTERVAL_MS = 40;
+
+// ---------- Modes ----------
+static void enterMode(Mode m) {
+  mode = m;
+  modeStart = millis();
+  switch (mode) {
+    case MODE_SCAN:
+      fill_solid(leds, NUM_LEDS, CRGB::Black);
+      scanRow = 0; scanStep = 0; prevIdx = XY(0, 0); lastScanStepMs = 0;
+      break;
+
+    case MODE_HELLO:
+      fill_solid(leds, NUM_LEDS, CRGB::Black);
+      drawText("HELLO", 0, CRGB::Green);
+      break;
+
+    case MODE_TIME1: {
+      fill_solid(leds, NUM_LEDS, CRGB::Black);
+      struct tm ti;
+      if (getLocalTime(&ti)) {
+        char buf[6]; // "HH:MM"
+        strftime(buf, sizeof(buf), "%H:%M", &ti);
+        drawText(buf, 0, CRGB::Blue);
+      } else {
+        drawText("NOCLK", 0, CRGB::Red);
+      }
+      break;
+    }
+
+    case MODE_TIME2:
+      fill_solid(leds, NUM_LEDS, CRGB::Black);
+      drawText("45:67", 0, CRGB::Orange);
+      break;
+
+    case MODE_TIME3:
+      fill_solid(leds, NUM_LEDS, CRGB::Black);
+      drawText("89:00", 0, CRGB::Purple);
+      break;
+
+    case MODE_SINELON:
+    case MODE_CONFETTI:
+    case MODE_TRANSITION:
+    case MODE_CONFETTI_REVEAL:
+      // drawn per-frame in loop()
+      break;
+  }
+}
+
+// ---------- Time helpers ----------
+void printLocalTime() {
+  struct tm ti;
+  if (!getLocalTime(&ti)) { Serial.println("No time available (yet)"); return; }
+  Serial.println(&ti, "%A, %B %d %Y %H:%M:%S");
+}
+void timeavailable(struct timeval* /*t*/) {
+  Serial.println("Got time adjustment from NTP!");
+  printLocalTime();
+}
 
 void setup() {
-	// enable LCD Display
-	lcd.begin(16, 2);              // set up the LCD's number of columns and rows:
-	lcd.setCursor(0, 0);
-	lcd.print(initmessage);
+  // --- Serial first (C6) ---
+  Serial.begin(115200);
+  delay(100);
+  Serial.println("\nBooting...");
 
-	// enable DHT temperature sensor
-	dht.begin();
+  // --- LEDs ---
+  FastLED.addLeds<MATRIX_TYPE, DATA_PIN, COLOR_ORDER>(leds, NUM_LEDS);
+  FastLED.setBrightness(MATRIX_BRIGHTNESS);
+  fill_solid(leds, NUM_LEDS, CRGB::Black);
+  FastLED.show();
+  enterMode(MODE_SCAN);
 
-	// Debugging
-	Serial.begin(9600);
-	while (!Serial);              // wait for Arduino Serial Monitor
-	serialPrefix();
-	Serial.print("Clock booting\n");
+  // --- Bring up lwIP/netif before any lwIP-related API ---
+  WiFi.mode(WIFI_STA);
 
-	// enable Real-Time Clock
-	Rtc.Begin();
-	if (!Rtc.IsDateTimeValid())
-		errorflag = 1;
-	if (!Rtc.GetIsRunning())
-		Rtc.SetIsRunning(true);
+  // SNTP config (order matters on C6)
+  sntp_set_time_sync_notification_cb(timeavailable); // callback on sync
+  sntp_set_sync_mode(SNTP_SYNC_MODE_IMMED);          // apply time immediately
+  esp_sntp_servermode_dhcp(1);                       // enable DHCP option 42 (safe now)
 
-	// Read and set alarms
-	syncRealTimeClock();
+  // --- Wi-Fi connect ---
+  Serial.printf("Connecting to %s", ssid);
+  WiFi.begin(ssid, password);
 
-	// Function logic timers
-	alarmSyncRealTimeClock = Alarm.timerRepeat(600, readRealTimeClock); // sync RTC Clock every 10 minutes
-	alarmSyncTemperature = Alarm.timerRepeat(10, syncTemperature);      // sync Temperature every 10 seconds
-	alarmDisplayTime = Alarm.timerRepeat(60, displayClock);             // display time update every 60 seconds
+  const unsigned long connectTimeout = 20000; // 20s
+  unsigned long t0 = millis();
+  while (WiFi.status() != WL_CONNECTED && (millis() - t0) < connectTimeout) {
+    delay(250);
+    Serial.print('.');
+  }
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.printf("\nWiFi connected, IP: %s\n", WiFi.localIP().toString().c_str());
+  } else {
+    Serial.println("\nWiFi connect timeout; continuing without network");
+  }
+
+  // --- Time zone + NTP servers (preferred API) ---
+  configTzTime(time_zone, ntpServer1, ntpServer2);
+
+  // First print may say "No time available" until SNTP sync completes
+  printLocalTime();
 }
-
-/*
-* Main Board Loop
-*/
 
 void loop() {
-	Alarm.delay(1); // hit backend alarm logic
-	stateMachine.update(); // don't remove :)
-}
+  bool updated = false;
+  unsigned long now = millis();
 
-/*
-* States
-*/
+  // Hue drift for animated effects
+  EVERY_N_MILLISECONDS(20) { gHue++; }
 
-/*
-* Default Display Mode
-*/
-void timedisplayEnter() {
-	serialPrefix();
-	Serial.print("STATE: enter timedisplay\n");
-	secondsClearTimer.setTimeout(900);
-	secondsDisplayTimer.setTimeout(0);
-	secondsClearTimer.restart();
-	secondsDisplayTimer.restart();
-	lcd.clear();
-	readTemperature();
-	readRealTimeClock();
-	displayClock();
-	Alarm.enable(alarmSyncRealTimeClock);
-	Alarm.enable(alarmSyncTemperature);
-	Alarm.enable(alarmDisplayTime);
-}
+  // Periodic time log
+  EVERY_N_MILLISECONDS(5000) { printLocalTime(); }
 
-void timedisplayUpdate() {
-	if (setButton.onPressed()) stateMachine.transitionTo(configure);
+  switch (mode) {
 
-	if (secondsClearTimer.onRestart()) {
-		lcd.setCursor(2, 0);
-		lcd.print(" ");
-		secondsClearTimer.setTimeout(1000);
-		secondsClearTimer.restart();
-	}
+    case MODE_SCAN:
+      if (now - lastScanStepMs >= SCAN_INTERVAL_MS) {
+        lastScanStepMs = now;
+        uint8_t col = (scanRow & 1) ? (MATRIX_WIDTH - 1 - scanStep) : scanStep;
+        uint16_t idx = XY(col, scanRow);
+        leds[prevIdx] = CRGB::Black;
+        leds[idx]     = CRGB::Red;
+        prevIdx = idx;
+        updated = true;
+        if (++scanStep >= MATRIX_WIDTH) {
+          scanStep = 0;
+          if (++scanRow >= MATRIX_HEIGHT) enterMode(MODE_HELLO), updated = true;
+        }
+      }
+      break;
 
-	if (secondsDisplayTimer.onRestart()) {
-		lcd.setCursor(2, 0);
-		lcd.print(":");
-		secondsDisplayTimer.setTimeout(1000);
-		secondsDisplayTimer.restart();
-	}
-}
+    case MODE_HELLO:
+      if (now - modeStart >= 5000UL) { enterMode(MODE_TIME1); updated = true; }
+      break;
 
-void timedisplayExit() {
-	serialPrefix();
-	Serial.print("STATE: exit timedisplay\n");
-	Alarm.disable(alarmSyncRealTimeClock);
-	Alarm.disable(alarmSyncTemperature);
-	Alarm.disable(alarmDisplayTime);
-	lcd.clear();
-}
+    case MODE_TIME1:
+      if (now - modeStart >= 5000UL) {
+        // Sweep transition FROM current time (blue) TO "45:67" (orange)
+        struct tm ti; char buf[6] = "??:??";
+        if (getLocalTime(&ti)) strftime(buf, sizeof(buf), "%H:%M", &ti);
+        startTransition(buf, CRGB::Blue, "45:67", CRGB::Orange, MODE_TIME2);
+      }
+      break;
 
-/*
-* Clock Configure Mode
-*/
-void configureEnter() {
-	serialPrefix();
-	Serial.print("STATE: enter configuration\n");
-	lcd.clear();
-	lcd.print("Instellingen");
-}
-void configureUpdate() {
-	if (setButton.onPressed()) stateMachine.transitionTo(timedisplay);
-}
-void configureExit() {
-	serialPrefix();
-	Serial.print("STATE: exit configuration\n");
-	lcd.clear();
-}
+    case MODE_TIME2:
+      if (now - modeStart >= 5000UL) {
+        // Confetti reveal FROM "45:67" (orange) TO "89:00" (purple)
+        startConfettiReveal("45:67", CRGB::Orange, "89:00", CRGB::Purple, MODE_TIME3);
+      }
+      break;
 
-/*
-* Alarm going off
-*/
-void alarmEnter() {
+    case MODE_TIME3:
+      if (now - modeStart >= 5000UL) { enterMode(MODE_SINELON); updated = true; }
+      break;
 
-}
-void alarmUpdate() {
+    case MODE_SINELON:
+      sinelon(); updated = true;
+      if (now - modeStart >= 5000UL) { enterMode(MODE_CONFETTI); updated = true; }
+      break;
 
-}
-void alarmExit() {
+    case MODE_CONFETTI:
+      confetti(); updated = true;
+      if (now - modeStart >= 5000UL) { enterMode(MODE_SCAN); updated = true; }
+      break;
 
-}
+    // ---- Sweep transition composer ----
+    case MODE_TRANSITION: {
+      float t = (millis() - transitionStart) / float(TRANSITION_MS);
+      if (t > 1.0f) t = 1.0f;
+      float tt = t * t * (3.0f - 2.0f * t);
+      uint8_t sx = uint8_t(tt * (MATRIX_WIDTH - 1));
 
-/*
-* Display and set Alarm1 and Alarm2
-*/
-void alarm1displayUpdate() {
+      for (uint8_t y = 0; y < MATRIX_HEIGHT; y++) {
+        for (uint8_t x = 0; x < MATRIX_WIDTH; x++) {
+          int i = XY(x, y);
+          CRGB base = (x <= sx) ? toBuf[i] : fromBuf[i];
+          int dx = abs(int(x) - int(sx));
+          uint8_t falloff = (dx == 0) ? 255 : (dx == 1 ? 128 : (dx == 2 ? 64 : 0));
+          if (falloff) base += CHSV(gHue, 255, falloff);
+          leds[i] = base;
+        }
+      }
+      updated = true;
+      if (t >= 1.0f) { enterMode(transitionNext); updated = true; }
+      break;
+    }
 
-}
-void alarm2displayUpdate() {
+    // ---- Confetti reveal composer ----
+    case MODE_CONFETTI_REVEAL: {
+      // Start from current image buffer
+      for (uint16_t i = 0; i < NUM_LEDS; i++) leds[i] = currBuf[i];
 
-}
-void alarm1setEnter() {
+      // Flip a handful of not-yet-flashed pixels
+      uint8_t flips = CONFETTI_FLIPS_PER_FRAME;
+      uint8_t flashedThisFrame = 0;
+      uint16_t attempts = 0;
+      while (flips && flashedCount < NUM_LEDS && attempts < NUM_LEDS * 3) {
+        attempts++;
+        uint16_t j = random16(NUM_LEDS);
+        if (flashed[j]) continue;
+        flashed[j] = 1;
+        flashedCount++;
+        flips--;
+        flashedThisFrame++;
 
-}
-void alarm1setUpdate() {
+        // If target has color here, lock it in; otherwise erase to black
+        if (toBuf[j]) {
+          currBuf[j] = toBuf[j];
+        } else {
+          currBuf[j] = CRGB::Black;
+        }
 
-}
-void alarm1setExit() {
+        // Add a one-frame sparkle pop on this spot
+        leds[j] += CHSV(gHue + random8(64), 200, 255);
+      }
 
-}
-void alarm2setEnter() {
+      // Optional: add a few ephemeral sparkles elsewhere for flavor
+      for (uint8_t s = 0; s < 4; s++) {
+        uint16_t k = random16(NUM_LEDS);
+        if (!flashed[k]) leds[k] += CHSV(gHue + random8(64), 200, 180);
+      }
 
-}
-void alarm2setUpdate() {
+      updated = true;
 
-}
-void alarm2setExit() {
+      // Done when every pixel has been flashed at least once
+      if (flashedCount >= NUM_LEDS) {
+        // Ensure final image equals the target
+        for (uint16_t i = 0; i < NUM_LEDS; i++) currBuf[i] = toBuf[i];
+        for (uint16_t i = 0; i < NUM_LEDS; i++) leds[i]    = currBuf[i];
+        enterMode(transitionNext); updated = true;
+      }
+      break;
+    }
+  }
 
-}
-
-/*
-* Helper functions
-*/
-
-void syncTemperature() {
-	readTemperature();
-	displayTemp();
-}
-
-void syncRealTimeClock() {
-	serialPrefix();
-	Serial.print("METHOD: syncRealTimeClock() - ");
-	RtcDateTime now = Rtc.GetDateTime();
-	setTime(now.Hour(), now.Minute(), now.Second(), now.Day(), now.Month(), now.Year());
-	serialPrefix();
-	Serial.print(day());
-	Serial.print(".");
-	Serial.print(month());
-	Serial.print(".");
-	Serial.print(year());
-	Serial.print("\n");
-}
-
-void readRealTimeClock() {
-	serialPrefix();
-	Serial.print("METHOD: readRealTimeClock()\n");
-	syncRealTimeClock();
-	clearDisplay();
-}
-
-void readTemperature() {
-	serialPrefix();
-	Serial.print("METHOD: readTemperature() - Temperature: ");
-	sensors_event_t temp_event;
-	dht.temperature().getEvent(&temp_event);
-	temperature = temp_event.temperature + tempoffset;
-	dht.humidity().getEvent(&temp_event);
-	humidity = temp_event.relative_humidity;
-	Serial.print(temperature);
-	Serial.print("C");
-	Serial.print(", Humidity: ");
-	Serial.print(humidity);
-	Serial.print("%\n");
-}
-
-void displayTemp() {
-	serialPrefix();
-	Serial.print("METHOD: displayTemp()\n");
-	lcd.setCursor(0, 1);
-	lcd.print("T:");
-	lcd.print(temperature);
-	lcd.setCursor(6, 1);
-	lcd.print("C V:");
-	lcd.print(humidity);
-	lcd.setCursor(14, 1);
-	lcd.print("%");
-}
-
-void clearDisplay() {
-	lcd.clear();
-	displayDate();
-	displayTemp();
-}
-
-void displayDate() {
-	serialPrefix();
-	Serial.print("METHOD: displayDate()\n");
-	lcd.setCursor(10, 0);
-	printDigits(day());
-	lcd.print("/");
-	printDigits(month());
-}
-
-void displayClock() {
-	serialPrefix();
-	Serial.print("METHOD: displayClock()\n");
-	lcd.setCursor(0, 0);
-	printDigits(hour());
-	lcd.setCursor(3, 0);
-	printDigits(minute());
-}
-
-void serialPrefix() {
-	serialPrintDigits(hour());
-	Serial.print(":");
-	serialPrintDigits(minute());
-	Serial.print(":");
-	serialPrintDigits(second());
-	Serial.print(" ");
-}
-
-void serialPrintDigits(int digits) {
-	if (digits < 10)
-		Serial.print('0');
-	Serial.print(digits);
-}
-
-void printDigits(int digits) {
-	if (digits < 10)
-		lcd.print('0');
-	lcd.print(digits);
+  if (updated) FastLED.show();
 }
